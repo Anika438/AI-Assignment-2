@@ -21,6 +21,7 @@ class SimulationEvent:
     event_type: str = field(compare=False)
     ambulance_id: int = field(default=-1, compare=False)
     call_id: int = field(default=-1, compare=False)
+    destination: Location | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -34,7 +35,7 @@ class CallOutcome:
 
 
 class AmbulanceSimulator:
-    """Simulate ambulance dispatch, service, and relocation."""
+    """Simulate ambulance dispatch, incident service, and relocation."""
 
     def __init__(
         self,
@@ -49,7 +50,6 @@ class AmbulanceSimulator:
         self.current_time_min = 0.0
         self._event_sequence = 0
         self._events: list[SimulationEvent] = []
-        self._relocation_destinations: dict[int, Location] = {}
 
         self.pending_calls: list[EmergencyCall] = []
         self.outcomes: list[CallOutcome] = []
@@ -83,6 +83,7 @@ class AmbulanceSimulator:
         event_type: str,
         ambulance_id: int = -1,
         call_id: int = -1,
+        destination: Location | None = None,
     ) -> None:
         """Add an event to the priority queue."""
         self._event_sequence += 1
@@ -94,6 +95,7 @@ class AmbulanceSimulator:
                 event_type=event_type,
                 ambulance_id=ambulance_id,
                 call_id=call_id,
+                destination=destination,
             ),
         )
 
@@ -120,11 +122,7 @@ class AmbulanceSimulator:
         ambulance_id: int,
         target_base_id: int,
     ) -> bool:
-        """Start moving an idle ambulance to a candidate base.
-
-        Returns False if it is busy or already at the destination.
-        The ambulance becomes available after the arrival event.
-        """
+        """Start relocating an idle ambulance to a candidate base."""
         if not 0 <= ambulance_id < len(self.ambulances):
             raise ValueError("Invalid ambulance ID")
 
@@ -149,8 +147,6 @@ class AmbulanceSimulator:
 
         ambulance.start_repositioning()
         ambulance.available_at_min = self.current_time_min + travel_time
-
-        self._relocation_destinations[ambulance_id] = destination
         self.relocation_count += 1
         self.relocation_minutes += travel_time
 
@@ -158,8 +154,8 @@ class AmbulanceSimulator:
             ambulance.available_at_min,
             "finish_repositioning",
             ambulance_id=ambulance_id,
+            destination=destination,
         )
-
         return True
 
     def _dispatch(self, call: EmergencyCall) -> bool:
@@ -174,7 +170,6 @@ class AmbulanceSimulator:
             return False
 
         call_location = Location(*call.location)
-
         ambulance = min(
             available,
             key=lambda unit: self.city.road_distance(
@@ -189,7 +184,6 @@ class AmbulanceSimulator:
             call_location,
             self.config.emergency_speed_kmh,
         )
-
         response_time = self.config.dispatch_delay_min + travel_time
 
         self._schedule_event(
@@ -197,6 +191,7 @@ class AmbulanceSimulator:
             "arrive_scene",
             ambulance_id=ambulance.ambulance_id,
             call_id=call.call_id,
+            destination=call_location,
         )
 
         self.outcomes.append(
@@ -207,63 +202,126 @@ class AmbulanceSimulator:
                 ambulance_id=ambulance.ambulance_id,
             )
         )
-
         return True
 
+    def _sample_lognormal_duration(
+        self,
+        mean: float,
+        sigma: float,
+    ) -> float:
+        """Sample a positive duration with the requested arithmetic mean."""
+        if mean <= 0:
+            raise ValueError("Duration mean must be positive")
+        if sigma < 0:
+            raise ValueError("Duration sigma cannot be negative")
+        if sigma == 0:
+            return mean
+
+        return self.rng.lognormvariate(
+            math.log(mean) - 0.5 * sigma**2,
+            sigma,
+        )
+
     def _handle_event(self, event: SimulationEvent) -> None:
-        """Process one scheduled simulation event."""
+        """Process one scheduled event."""
         self.current_time_min = event.time_min
         ambulance = self.ambulances[event.ambulance_id]
 
         if event.event_type == "finish_repositioning":
-            destination = self._relocation_destinations.pop(
-                event.ambulance_id
-            )
-            ambulance.finish_repositioning(destination)
+            if event.destination is None:
+                raise RuntimeError("Relocation event has no destination")
+
+            ambulance.finish_repositioning(event.destination)
             ambulance.available_at_min = self.current_time_min
             return
 
         if event.event_type == "arrive_scene":
+            if event.destination is None:
+                raise RuntimeError("Scene arrival has no location")
+
+            ambulance.location = event.destination
             ambulance.status = AmbulanceStatus.AT_SCENE
 
-            sigma = self.config.scene_time_sigma
-            mean = self.config.scene_time_mean_min
-
-            scene_duration = self.rng.lognormvariate(
-                math.log(mean) - 0.5 * sigma**2,
-                sigma,
+            scene_duration = self._sample_lognormal_duration(
+                self.config.scene_time_mean_min,
+                self.config.scene_time_sigma,
             )
 
             self._schedule_event(
                 self.current_time_min + scene_duration,
-                "finish_service",
+                "finish_scene",
                 ambulance_id=ambulance.ambulance_id,
                 call_id=event.call_id,
             )
+            return
 
-        elif event.event_type == "finish_service":
-            # Simplified service model: release the ambulance at the scene.
+        if event.event_type == "finish_scene":
+            should_transport = (
+                self.rng.random() < self.config.transport_probability
+            )
+
+            if not should_transport:
+                ambulance.finish_call(ambulance.location)
+                ambulance.available_at_min = self.current_time_min
+                return
+
+            hospital_id = self.city.nearest_hospital(ambulance.location)
+            hospital = self.city.hospitals[hospital_id]
+            ambulance.status = AmbulanceStatus.TO_HOSPITAL
+
+            travel_time = self._travel_time(
+                ambulance.location,
+                hospital,
+                self.config.emergency_speed_kmh,
+            )
+
+            self._schedule_event(
+                self.current_time_min + travel_time,
+                "arrive_hospital",
+                ambulance_id=ambulance.ambulance_id,
+                call_id=event.call_id,
+                destination=hospital,
+            )
+            return
+
+        if event.event_type == "arrive_hospital":
+            if event.destination is None:
+                raise RuntimeError("Hospital arrival has no location")
+
+            ambulance.location = event.destination
+            ambulance.status = AmbulanceStatus.AT_HOSPITAL
+
+            handover_duration = self._sample_lognormal_duration(
+                self.config.hospital_handover_mean_min,
+                self.config.hospital_handover_sigma,
+            )
+
+            self._schedule_event(
+                self.current_time_min + handover_duration,
+                "finish_handover",
+                ambulance_id=ambulance.ambulance_id,
+                call_id=event.call_id,
+            )
+            return
+
+        if event.event_type == "finish_handover":
             ambulance.finish_call(ambulance.location)
             ambulance.available_at_min = self.current_time_min
 
     def run_day(self) -> list[CallOutcome]:
-        """Run one day's calls and scheduled events.
+        """Run one day's demand and scheduled events.
 
-        Calls that arrive when every ambulance is busy are counted as
-        dropped in this version; queued-call handling is not implemented.
+        Calls arriving when every ambulance is busy are counted as dropped.
         """
         self.current_time_min = 0.0
         self._event_sequence = 0
         self._events = []
-        self._relocation_destinations = {}
         self.outcomes = []
         self.dropped_calls = 0
         self.relocation_count = 0
         self.relocation_minutes = 0.0
-
         self.pending_calls = self.demand_generator.generate_day()
 
-        # Reset ambulances to their configured home bases.
         for ambulance in self.ambulances:
             ambulance.location = self.city.bases[ambulance.home_base_id]
             ambulance.status = AmbulanceStatus.IDLE
