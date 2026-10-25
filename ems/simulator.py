@@ -308,10 +308,12 @@ class AmbulanceSimulator:
             ambulance.finish_call(ambulance.location)
             ambulance.available_at_min = self.current_time_min
 
-    def run_day(self) -> list[CallOutcome]:
-        """Run one day's demand and scheduled events.
+    
+    def run_day(self, decision_callback=None) -> list[CallOutcome]:
+        """Run one day, optionally requesting periodic redeployment decisions.
 
-        Calls arriving when every ambulance is busy are counted as dropped.
+        The callback receives the simulator at each decision epoch.
+        It may call relocate_ambulance() to move an idle unit.
         """
         self.current_time_min = 0.0
         self._event_sequence = 0
@@ -329,6 +331,8 @@ class AmbulanceSimulator:
             ambulance.available_at_min = 0.0
 
         call_index = 0
+        interval = self.config.redeployment_interval_min
+        next_decision_time = interval
 
         while call_index < len(self.pending_calls) or self._events:
             next_call_time = (
@@ -336,12 +340,22 @@ class AmbulanceSimulator:
                 if call_index < len(self.pending_calls)
                 else float("inf")
             )
-
             next_event_time = (
                 self._events[0].time_min
                 if self._events
                 else float("inf")
             )
+            next_time = min(next_call_time, next_event_time)
+
+            if (
+                decision_callback is not None
+                and next_decision_time <= next_time
+                and next_decision_time < self.config.episode_duration_hours * 60
+            ):
+                self.current_time_min = next_decision_time
+                decision_callback(self)
+                next_decision_time += interval
+                continue
 
             if next_call_time <= next_event_time:
                 self.current_time_min = next_call_time
@@ -355,3 +369,4 @@ class AmbulanceSimulator:
                 self._handle_event(event)
 
         return self.outcomes
+
