@@ -1,0 +1,5 @@
+# Dynamic Ambulance Redeployment Simulator (RL)
+# Pure Python 3.10+ standard library architecture (no heavy ML/RL framework dependencies)
+# NumPy is optional/recommended for external analysis pipelines.
+numpy>=1.24.0
+

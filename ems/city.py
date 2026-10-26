@@ -14,6 +14,10 @@ class Location:
     x: float
     y: float
 
+    def is_close_to(self, other: "Location", tol: float = 1e-5) -> bool:
+        """Check if two locations are effectively the same point."""
+        return abs(self.x - other.x) <= tol and abs(self.y - other.y) <= tol
+
 
 class City:
     """Represent the simulated city and its candidate locations."""
@@ -104,3 +108,32 @@ class City:
                 location, self.hospitals[index]
             ),
         )
+
+    def demand_coverage_fraction(
+        self,
+        ambulance_locations: list[Location],
+        hour: float,
+        target_response_min: float = 8.0,
+    ) -> float:
+        """Calculate the proportion of weighted hotspot demand reachable within the target time."""
+        if not ambulance_locations:
+            return 0.0
+
+        avail_travel_time = target_response_min - self.config.dispatch_delay_min
+        if avail_travel_time <= 0:
+            return 0.0
+
+        max_road_dist = (avail_travel_time / 60.0) * self.config.emergency_speed_kmh
+        from ems.config import hotspot_weights
+        weights = hotspot_weights(hour)
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return 1.0
+
+        covered_weight = 0.0
+        for (hx, hy, spread, _name), weight in zip(self.config.hotspots, weights):
+            h_loc = Location(hx, hy)
+            if any(self.road_distance(amb_loc, h_loc) <= max_road_dist for amb_loc in ambulance_locations):
+                covered_weight += weight
+
+        return covered_weight / total_weight
