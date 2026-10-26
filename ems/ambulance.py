@@ -47,7 +47,7 @@ class Ambulance:
         self.assigned_call_id = call_id
         self.status = AmbulanceStatus.RESPONDING
 
-    def finish_call(self, new_location: Location) -> None:
+    def finish_call(self, new_location: Location, current_time_min: float = 0.0) -> None:
         """Release the ambulance after completing its current call."""
         if self.assigned_call_id is None:
             raise ValueError("Ambulance has no assigned call")
@@ -55,8 +55,9 @@ class Ambulance:
         self.location = new_location
         self.assigned_call_id = None
         self.status = AmbulanceStatus.IDLE
+        self.available_at_min = current_time_min
 
-    def start_repositioning(self) -> None:
+    def start_repositioning(self, available_at_min: float = 0.0) -> None:
         """Mark an idle ambulance as moving to a different base."""
         if self.status != AmbulanceStatus.IDLE:
             raise ValueError("Only an idle ambulance can reposition")
@@ -64,11 +65,13 @@ class Ambulance:
             raise ValueError("An assigned ambulance cannot reposition")
 
         self.status = AmbulanceStatus.REPOSITIONING
+        self.available_at_min = available_at_min
 
-    def finish_repositioning(self, new_location: Location) -> None:
+    def finish_repositioning(self, new_location: Location, current_time_min: float = 0.0) -> None:
         """Finish relocation and update the ambulance's location."""
         if self.status != AmbulanceStatus.REPOSITIONING:
             raise ValueError("Ambulance is not repositioning")
 
         self.location = new_location
         self.status = AmbulanceStatus.IDLE
+        self.available_at_min = current_time_min
